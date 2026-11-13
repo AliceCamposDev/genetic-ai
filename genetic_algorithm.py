@@ -129,6 +129,7 @@ class GeneticSolver:
         previous: set[str] | None = None,
         should_stop: Callable[[], bool] | None = None,
         on_generation: GenerationCallback | None = None,
+        strategy: tuple[str, ...] | None = None,
     ) -> str:
         """Evolui uma população e retorna o melhor palpite da rodada."""
         if not candidates:
@@ -137,6 +138,16 @@ class GeneticSolver:
             return candidates[0]
 
         previous = previous or set()
+        if strategy is not None:
+            ranked = sorted(
+                (word for word in strategy if word not in previous),
+                key=lambda word: self._fitness(word, candidates),
+                reverse=True,
+            )
+            if ranked:
+                return ranked[0]
+            return max(candidates, key=lambda word: self._fitness(word, candidates))
+
         population = self._initial_population(candidates, previous)
         for _ in range(self.config.generations):
             if should_stop and should_stop():
@@ -173,12 +184,54 @@ class GeneticSolver:
 
         return max(population, key=lambda word: self._fitness(word, candidates))
 
+    def train_strategy(
+        self,
+        should_stop: Callable[[], bool] | None = None,
+        on_generation: GenerationCallback | None = None,
+    ) -> tuple[str, ...]:
+        """Treina uma estratégia uma vez sobre o vocabulário inteiro."""
+        population = self._initial_population(self.words, set())
+        for _ in range(self.config.generations):
+            if should_stop and should_stop():
+                raise TrainingCancelled
+            ranked = sorted(
+                population,
+                key=lambda word: self._fitness(word, self.words),
+                reverse=True,
+            )
+            if on_generation:
+                scores = [self._fitness(word, self.words) for word in ranked]
+                on_generation(
+                    _ + 1,
+                    scores[0],
+                    sum(scores) / len(scores),
+                    ranked[0],
+                )
+            elites = ranked[:self.config.elite_size]
+            next_population = list(elites)
+            while len(next_population) < self.config.population_size:
+                tournament = self.rng.sample(
+                    ranked, min(self.config.tournament_size, len(ranked))
+                )
+                first = max(tournament, key=lambda word: self._fitness(word, self.words))
+                tournament = self.rng.sample(
+                    ranked, min(self.config.tournament_size, len(ranked))
+                )
+                second = max(tournament, key=lambda word: self._fitness(word, self.words))
+                child = self._crossover(first, second)
+                if self.rng.random() < self.config.mutation_rate:
+                    child = self._mutate(child)
+                next_population.append(child)
+            population = list(dict.fromkeys(next_population))
+        return tuple(sorted(population, key=lambda word: self._fitness(word, self.words), reverse=True))
+
     def solve(
         self,
         target: str,
         max_attempts: int = 6,
         should_stop: Callable[[], bool] | None = None,
         on_generation: GenerationCallback | None = None,
+        strategy: tuple[str, ...] | None = None,
     ) -> list[GuessResult]:
         """Resolve um alvo conhecido pelo motor e retorna o histórico de palpites."""
         game = WordGame(target=target, words=self.words, max_attempts=max_attempts)
@@ -187,7 +240,13 @@ class GeneticSolver:
         while not game.is_finished:
             if should_stop and should_stop():
                 raise TrainingCancelled
-            guess = self.choose_guess(candidates, previous, should_stop, on_generation)
+            guess = self.choose_guess(
+                candidates,
+                previous,
+                should_stop,
+                on_generation if strategy is None else None,
+                strategy,
+            )
             result = game.try_guess(guess)
             previous.add(guess)
             if result.won:

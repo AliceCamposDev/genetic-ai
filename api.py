@@ -53,8 +53,6 @@ app.add_middleware(
 )
 sessions: dict[str, Session] = {}
 training_stops: dict[str, threading.Event] = {}
-
-
 @app.websocket("/api/training/ws/{training_id}")
 async def training_socket(websocket: WebSocket, training_id: str) -> None:
     await websocket.accept()
@@ -66,17 +64,15 @@ async def training_socket(websocket: WebSocket, training_id: str) -> None:
         config_data = await websocket.receive_json()
         request = TrainingRequest(training_id=training_id, **config_data)
         rng = random.Random(request.seed)
-        solver = GeneticSolver(
-            words=default_words_for_length(request.word_length),
-            config=SolverConfig(
-                population_size=request.population_size,
-                generations=request.generations,
-                elite_size=min(12, request.population_size),
-                tournament_size=min(4, request.population_size),
-                mutation_rate=request.mutation_rate,
-            ),
-            rng=rng,
+        config = SolverConfig(
+            population_size=request.population_size,
+            generations=request.generations,
+            elite_size=min(12, request.population_size),
+            tournament_size=min(4, request.population_size),
+            mutation_rate=request.mutation_rate,
         )
+        words = default_words_for_length(request.word_length)
+        solver = GeneticSolver(words=words, config=config, rng=rng)
         if request.target:
             target = normalize_word(request.target)
             if target not in solver.words:
@@ -89,35 +85,50 @@ async def training_socket(websocket: WebSocket, training_id: str) -> None:
             targets = [target]
         else:
             targets = rng.sample(solver.words, min(request.sample_size, len(solver.words)))
-        current_target = {"index": 0}
-
-        def publish(generation: int, best: float, average: float, word: str) -> None:
-            messages.put({
-                "type": "progress",
-                "generation": generation,
-                "total_generations": request.generations,
-                "best_fitness": best,
-                "average_fitness": average,
-                "best_word": word,
-                "target_index": current_target["index"] + 1,
-                "target_total": len(targets),
-            })
-
         def train() -> None:
-            histories = []
             try:
-                for index, target in enumerate(targets):
+                def publish(generation: int, best: float, average: float, word: str) -> None:
+                    messages.put({
+                        "type": "progress",
+                        "generation": generation,
+                        "total_generations": request.generations,
+                        "best_fitness": best,
+                        "average_fitness": average,
+                        "best_word": word,
+                        "target_index": 0,
+                        "target_total": len(targets),
+                        "phase": "training",
+                    })
+
+                strategy = solver.train_strategy(
+                    should_stop=stop_event.is_set,
+                    on_generation=publish,
+                )
+                completed_results = []
+                for index, target in enumerate(targets, start=1):
                     if stop_event.is_set():
                         break
-                    current_target["index"] = index
-                    histories.append(solver.solve(
+                    history = solver.solve(
                         target,
                         should_stop=stop_event.is_set,
-                        on_generation=publish,
-                    ))
+                        strategy=strategy,
+                    )
+                    completed_results.append((target, history))
+                    messages.put({
+                        "type": "progress",
+                        "generation": request.generations,
+                        "total_generations": request.generations,
+                        "best_fitness": 0,
+                        "average_fitness": 0,
+                        "best_word": history[-1].guess if history else "—",
+                        "target_index": index,
+                        "target_total": len(targets),
+                        "phase": "testing",
+                    })
                 if stop_event.is_set():
                     messages.put({"type": "cancelled"})
                     return
+                histories = [item[1] for item in completed_results]
                 attempts = [len(history) for history in histories]
                 wins = [history[-1].won for history in histories]
                 cases = [
@@ -133,7 +144,7 @@ async def training_socket(websocket: WebSocket, training_id: str) -> None:
                             for result in history
                         ],
                     }
-                    for target, history in zip(targets[:len(histories)], histories)
+                    for target, history in completed_results
                 ]
                 messages.put({
                     "type": "complete",
@@ -241,19 +252,20 @@ def run_training(request: TrainingRequest) -> dict:
     config = SolverConfig(
         population_size=request.population_size,
         generations=request.generations,
+        elite_size=min(12, request.population_size),
+        tournament_size=min(4, request.population_size),
         mutation_rate=request.mutation_rate,
     )
-    solver = GeneticSolver(words=default_words_for_length(request.word_length), config=config, rng=rng)
+    words = default_words_for_length(request.word_length)
+    solver = GeneticSolver(words=words, config=config, rng=rng)
     targets = rng.sample(solver.words, min(request.sample_size, len(solver.words)))
     try:
-        histories = []
-        for target in targets:
-            if stop_event.is_set():
-                break
-            try:
-                histories.append(solver.solve(target, should_stop=stop_event.is_set))
-            except TrainingCancelled:
-                break
+        strategy = solver.train_strategy(should_stop=stop_event.is_set)
+        histories = [
+            solver.solve(target, should_stop=stop_event.is_set, strategy=strategy)
+            for target in targets
+            if not stop_event.is_set()
+        ]
         if not histories:
             return {"cancelled": True, "sample_size": 0}
         attempts = [len(history) for history in histories]

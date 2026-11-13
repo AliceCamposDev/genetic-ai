@@ -302,6 +302,35 @@ os candidatos compatíveis e o conjunto de palpites anteriores.
 
 Quando sobra apenas um candidato, ele é usado diretamente como resposta.
 
+## Separação entre treinamento e teste
+
+O botão de treinamento executa uma única fase de evolução genética. Nessa
+fase, a população é otimizada usando o vocabulário inteiro e produz uma
+estratégia ordenada de palpites.
+
+Depois disso, a amostra de 100 palavras (ou a quantidade configurada) é usada
+somente para teste:
+
+```text
+1 treinamento genético
+        ↓
+estratégia treinada
+        ↓
+teste no alvo 1
+teste no alvo 2
+teste no alvo 3
+...
+teste no alvo 100
+```
+
+Durante os testes, o solver não executa novas gerações, não faz crossover e
+não aplica mutação. Ele apenas usa a estratégia já treinada, filtra os
+candidatos conforme cada feedback e escolhe o melhor palpite disponível.
+
+As tentativas de uma mesma palavra continuam sequenciais porque cada uma
+depende do feedback da anterior. O progresso da interface distingue as duas
+fases: `training` para as gerações e `testing` para os alvos avaliados.
+
 ## Uso pelo terminal
 
 ### Jogar manualmente no terminal
